@@ -1,0 +1,6 @@
+{
+  "name": "Modern Spreadsheet UI",
+  "description": "A UI clone of a modern spreadsheet application with ribbon menu, toolbar, formula bar, and grid.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
