@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { HexColorPicker } from 'react-colorful';
 import {
   Bold, Italic, Underline, ChevronDown, AlignLeft, AlignCenter, AlignRight,
   ArrowUpDown, WrapText, DollarSign, Percent, Lightbulb, Table as TableIcon,
@@ -14,14 +16,356 @@ import {
   Map, LayoutList, BarChart, PanelTop, Radar, LayoutGrid, Sun, SlidersHorizontal, TrendingDown, Filter
 } from 'lucide-react';
 
-const ToolbarItem = ({ icon: Icon, label, active = false, iconColor = "text-slate-600" }: any) => (
-  <div className="flex flex-col items-center justify-start gap-1 cursor-pointer min-w-[52px] group px-1">
-    <div className={`p-1.5 rounded-lg transition-colors ${active ? 'bg-[#e5ecf6] text-blue-700' : 'hover:bg-slate-100 ' + iconColor}`}>
-      <Icon size={18} strokeWidth={active ? 2 : 1.5} />
+/* ----- STATE MANAGEMENT ----- */
+const cols = Array.from({length: 40}, (_, i) => {
+  if (i < 26) return String.fromCharCode(65 + i);
+  return 'A' + String.fromCharCode(65 + (i - 26));
+});
+const rows = Array.from({length: 40}, (_, i) => i + 1);
+
+const getColIdx = (col: string) => cols.indexOf(col);
+const getRange = (start: string, end: string) => {
+  const startCol = start.match(/[A-Z]+/)?.[0] || 'A';
+  const startRow = parseInt(start.match(/[0-9]+/)?.[0] || '1');
+  const endCol = end.match(/[A-Z]+/)?.[0] || 'A';
+  const endRow = parseInt(end.match(/[0-9]+/)?.[0] || '1');
+
+  return {
+    minColIdx: Math.min(getColIdx(startCol), getColIdx(endCol)),
+    maxColIdx: Math.max(getColIdx(startCol), getColIdx(endCol)),
+    minRow: Math.min(startRow, endRow),
+    maxRow: Math.max(startRow, endRow)
+  };
+};
+
+interface CellData { 
+  value: string; 
+  bold?: boolean; 
+  italic?: boolean; 
+  underline?: boolean; 
+  align?: 'left' | 'center' | 'right';
+  vAlign?: 'top' | 'middle' | 'bottom';
+  wrapText?: boolean;
+  fontFamily?: string;
+  fontSize?: number;
+  textColor?: string;
+  fillColor?: string;
+}
+
+let sharedState = {
+  activeCell: 'A1',
+  selection: { start: 'A1', end: 'A1' },
+  isDragging: false,
+  editingCell: null as string | null,
+  data: {} as Record<string, CellData>,
+  showFloatingMenu: false,
+  floatingPos: { top: 0, left: 0 },
+  recentColors: [] as string[]
+};
+
+const listeners = new Set<() => void>();
+
+const dispatch = (partial: Partial<typeof sharedState>) => {
+  sharedState = { ...sharedState, ...partial };
+  listeners.forEach(l => l());
+};
+
+const useSharedState = () => {
+  const [state, setState] = useState(sharedState);
+  useEffect(() => {
+    const l = () => setState(sharedState);
+    listeners.add(l);
+    return () => { listeners.delete(l); };
+  }, []);
+  return state;
+};
+
+const updateSelectionStyle = (styleKey: keyof CellData, value: any, toggle: boolean = false) => {
+  const { start, end } = sharedState.selection;
+  const { minColIdx, maxColIdx, minRow, maxRow } = getRange(start, end);
+  const newData = { ...sharedState.data };
+  
+  let allOn = true;
+  if (toggle) {
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minColIdx; c <= maxColIdx; c++) {
+        const id = `${cols[c]}${r}`;
+        if (!newData[id]?.[styleKey]) {
+          allOn = false;
+          break;
+        }
+      }
+    }
+  }
+
+  const newValue = toggle ? !allOn : value;
+
+  for (let r = minRow; r <= maxRow; r++) {
+    for (let c = minColIdx; c <= maxColIdx; c++) {
+      const id = `${cols[c]}${r}`;
+      const current = newData[id] || { value: '' };
+      newData[id] = { ...current, [styleKey]: newValue };
+    }
+  }
+  dispatch({ data: newData });
+};
+
+
+/* ----- UI COMPONENTS ----- */
+const EditableDropdown = ({ items, value, onSelect, placeholder, className, isNumber = false }: any) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const triggerRef = useRef<HTMLDivElement>(null);
+    const [coords, setCoords] = useState({ top: 0, left: 0 });
+    
+    const currentItem = items.find((i: any) => i.value === value);
+    const displayValue = currentItem ? currentItem.label : (value || '');
+    const [inputValue, setInputValue] = useState(displayValue);
+
+    useEffect(() => {
+        setInputValue(displayValue);
+    }, [value, items, displayValue]);
+
+    const handleOpen = () => {
+        if (!isOpen && triggerRef.current) {
+            const rect = triggerRef.current.getBoundingClientRect();
+            setCoords({ top: rect.bottom + window.scrollY, left: rect.left + window.scrollX });
+        }
+        setIsOpen(true);
+    };
+
+    const commitValue = () => {
+        let val: any = inputValue;
+        if (isNumber) {
+            val = parseInt(inputValue, 10);
+            if (isNaN(val) || val <= 0) {
+                setInputValue(displayValue);
+                return;
+            }
+        }
+        onSelect(val);
+        setIsOpen(false);
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') {
+            commitValue();
+        }
+    };
+
+    return (
+        <div className={`relative ${className || ''}`} ref={triggerRef}>
+            <div className="flex flex-row items-center border border-slate-200 rounded-sm bg-white hover:bg-slate-50 transition-colors w-full h-[24px]">
+                <input
+                    type="text"
+                    className="w-full px-1.5 py-0 text-[11px] font-medium text-slate-700 outline-none bg-transparent min-w-0"
+                    value={inputValue}
+                    onChange={(e) => setInputValue(e.target.value)}
+                    onFocus={(e) => { e.target.select(); handleOpen(); }}
+                    onBlur={() => {
+                        setTimeout(() => commitValue(), 150);
+                    }}
+                    onKeyDown={handleKeyDown}
+                    placeholder={placeholder}
+                />
+                <div 
+                    className="px-1 cursor-pointer h-full flex items-center justify-center border-l border-transparent hover:border-slate-200 hover:bg-slate-100"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        if (isOpen) setIsOpen(false); else handleOpen();
+                    }}
+                >
+                    <ChevronDown size={14} className="text-slate-400" />
+                </div>
+            </div>
+            {isOpen && createPortal(
+                <>
+                <div className="fixed inset-0 z-[100]" onClick={(e) => { e.stopPropagation(); setIsOpen(false); }} />
+                <div 
+                   className="absolute bg-white border border-slate-200 rounded-lg shadow-xl z-[101] min-w-max py-1 max-h-[300px] overflow-y-auto" 
+                   style={{ top: coords.top + 4, left: coords.left }}
+                >
+                    {items.map((item: any) => (
+                        <div 
+                            key={item.value || item.label} 
+                            onClick={(e) => { 
+                                e.stopPropagation(); 
+                                setInputValue(item.label);
+                                onSelect(item.value); 
+                                setIsOpen(false); 
+                            }}
+                            className={`px-4 py-1.5 hover:bg-slate-50 cursor-pointer text-sm text-slate-700 flex items-center gap-2 ${value === item.value ? 'bg-blue-50/50' : ''}`}
+                        >
+                            <span style={item.fontFamily ? { fontFamily: item.fontFamily } : {}}>{item.label}</span>
+                        </div>
+                    ))}
+                </div>
+                </>,
+                document.body
+            )}
+        </div>
+    );
+};
+
+const DropdownMenu = ({ trigger, items, onSelect, className }: any) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const triggerRef = useRef<HTMLDivElement>(null);
+    const [coords, setCoords] = useState({ top: 0, left: 0 });
+
+    const handleOpen = () => {
+       if (!isOpen && triggerRef.current) {
+          const rect = triggerRef.current.getBoundingClientRect();
+          let top = rect.bottom + window.scrollY;
+          let left = rect.left + window.scrollX;
+          setCoords({ top, left });
+       }
+       setIsOpen(!isOpen);
+    };
+
+    useEffect(() => {
+        if (isOpen && triggerRef.current) {
+            const rect = triggerRef.current.getBoundingClientRect();
+            setCoords({ top: rect.bottom + window.scrollY, left: rect.left + window.scrollX });
+        }
+    }, [isOpen]);
+
+    return (
+        <div className={`relative ${className || ''}`} ref={triggerRef}>
+            {React.cloneElement(trigger, { onClick: handleOpen })}
+            {isOpen && createPortal(
+                <>
+                <div className="fixed inset-0 z-[100]" onClick={(e) => { e.stopPropagation(); setIsOpen(false); }} />
+                <div 
+                   className="absolute bg-white border border-slate-200 rounded-lg shadow-xl z-[101] min-w-max py-1 max-h-[300px] overflow-y-auto" 
+                   style={{ top: coords.top + 4, left: coords.left }}
+                >
+                    {items.map((item: any) => (
+                        <div 
+                            key={item.value || item.label} 
+                            onClick={(e) => { e.stopPropagation(); onSelect(item.value); setIsOpen(false); }}
+                            className="px-4 py-1.5 hover:bg-slate-50 cursor-pointer text-sm text-slate-700 flex items-center gap-2"
+                        >
+                            {item.color && <div className="w-4 h-4 rounded-full border border-slate-200" style={{ backgroundColor: item.color }} />}
+                            <span style={{ fontFamily: item.fontFamily }}>{item.label}</span>
+                        </div>
+                    ))}
+                </div>
+                </>,
+                document.body
+            )}
+        </div>
+    );
+};
+
+const ColorPickerMenu = ({ trigger, color, onSelect, className }: any) => {
+    const [isOpen, setIsOpen] = useState(false);
+    const triggerRef = useRef<HTMLDivElement>(null);
+    const [coords, setCoords] = useState({ top: 0, left: 0 });
+    const recentColors = useSharedState().recentColors;
+
+    const handleSelect = (c: string) => {
+        if (c !== 'transparent' && !recentColors.includes(c)) {
+            const newRecent = [c, ...recentColors].slice(0, 10);
+            dispatch({ recentColors: newRecent });
+        }
+        onSelect(c);
+    };
+
+    const handleOpen = () => {
+       if (!isOpen && triggerRef.current) {
+          const rect = triggerRef.current.getBoundingClientRect();
+          setCoords({ top: rect.bottom + window.scrollY, left: Math.max(0, rect.left + window.scrollX - 75) }); // Offset to left if too wide
+       }
+       setIsOpen(!isOpen);
+    };
+
+    useEffect(() => {
+        if (isOpen && triggerRef.current) {
+            const rect = triggerRef.current.getBoundingClientRect();
+            setCoords({ top: rect.bottom + window.scrollY, left: Math.max(0, rect.left + window.scrollX - 75) });
+        }
+    }, [isOpen]);
+
+    return (
+        <div className={`relative ${className || ''}`} ref={triggerRef}>
+            {React.cloneElement(trigger, { onClick: handleOpen })}
+            {isOpen && createPortal(
+                <>
+                <div className="fixed inset-0 z-[100]" onClick={(e) => { e.stopPropagation(); setIsOpen(false); }} />
+                <div 
+                   className="absolute bg-white border border-slate-200 rounded-lg shadow-xl z-[101] p-2 min-w-max flex flex-col gap-2" 
+                   style={{ top: coords.top + 4, left: coords.left }}
+                >
+                    {recentColors.length > 0 && (
+                        <>
+                            <div className="flex flex-col gap-1">
+                                <span className="text-[10px] text-slate-500 font-medium px-1">Recent Colors</span>
+                                <div className="flex gap-0.5 flex-wrap w-[160px]">
+                                    {recentColors.map(c => (
+                                        <div 
+                                            key={c} 
+                                            onClick={(e) => { e.stopPropagation(); handleSelect(c); setIsOpen(false); }}
+                                            className="w-5 h-5 cursor-pointer hover:scale-110 transition-transform border border-slate-200/50 rounded-sm"
+                                            style={{ backgroundColor: c }} 
+                                        />
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="w-full h-px bg-slate-200" />
+                        </>
+                    )}
+                    
+                    <div className="flex flex-col px-1 gap-2">
+                       <span className="text-[11px] text-slate-700 font-medium">Custom Color</span>
+                       <HexColorPicker 
+                          color={color !== 'transparent' && color ? color : '#ffffff'} 
+                          onChange={(newColor) => handleSelect(newColor)} 
+                          className="!w-full !h-[120px]"
+                       />
+                       <input 
+                          type="text" 
+                          value={color !== 'transparent' && color ? color : '#ffffff'}
+                          onChange={(e) => handleSelect(e.target.value)}
+                          className="w-full px-2 py-1 text-xs border border-slate-200 rounded"
+                       />
+                    </div>
+                    <div className="w-full h-px bg-slate-200 my-1" />
+                    <button 
+                       className="text-[11px] text-slate-700 hover:bg-slate-100 py-1 px-2 text-left rounded"
+                       onClick={(e) => { e.stopPropagation(); handleSelect('transparent'); setIsOpen(false); }}
+                    >
+                       No Fill
+                    </button>
+                </div>
+                </>,
+                document.body
+            )}
+        </div>
+    );
+};
+
+const ColorPickerIcon = ({ icon: Icon, color, onClick, isText = false, isFill=false }: any) => (
+  <div onClick={onClick} className="flex flex-col items-center justify-center p-1 rounded-sm hover:bg-slate-100 cursor-pointer h-[28px] min-w-[32px] group">
+    <div className="relative flex flex-col items-center gap-[1px]">
+      {isText ? (
+          <span className="font-serif font-bold text-[14px] leading-none mb-[1px] text-slate-700 group-hover:text-slate-900">A</span>
+      ) : (
+          <Icon size={14} className={isFill ? "text-emerald-600 mb-[1px]" : "text-slate-700"} strokeWidth={1.5} />
+      )}
+      <div className="w-[16px] h-[3px] rounded-[1px]" style={{ backgroundColor: color || (isFill ? 'transparent' : '#000000') }} />
     </div>
-    <span className="text-[10px] text-slate-500 font-medium whitespace-pre-line text-center leading-[1.1] opacity-90 group-hover:opacity-100 transition-opacity">
-      {label}
-    </span>
+  </div>
+);
+
+const ToolbarItem = ({ icon: Icon, label, active = false, iconColor = "text-slate-600", onClick, small = false }: any) => (
+  <div onClick={onClick} className={`flex flex-col items-center justify-start ${small ? 'gap-0.5 min-w-[32px]' : 'gap-1 min-w-[52px]'} cursor-pointer group px-1`}>
+    <div className={`p-1.5 rounded-lg transition-colors ${active ? 'bg-[#e5ecf6] text-blue-700' : 'hover:bg-slate-100 ' + iconColor}`}>
+      <Icon size={small ? 16 : 18} strokeWidth={active ? 2 : 1.5} />
+    </div>
+    {label && (
+      <span className="text-[10px] text-slate-500 font-medium whitespace-pre-line text-center leading-[1.1] opacity-90 group-hover:opacity-100 transition-opacity">
+        {label}
+      </span>
+    )}
   </div>
 );
 
@@ -72,7 +416,7 @@ const MenuTabs = ({ activeTab, setActiveTab }: any) => {
     const tabs = ['File', 'Home', 'Insert', 'Page Layout', 'Formulas', 'Help'];
     return (
         <div className="bg-white/70 backdrop-blur-md px-2 py-3 rounded-[24px] shadow-[0_2px_15px_-4px_rgba(0,0,0,0.05)] border border-white flex items-center justify-between text-sm shrink-0">
-           <div className="flex items-center flex-1 overflow-x-auto custom-scrollbar">
+           <div className="flex items-center flex-1 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
             {tabs.map((tab) => {
                 const isActive = tab === activeTab;
                 return (
@@ -106,32 +450,69 @@ const MenuTabs = ({ activeTab, setActiveTab }: any) => {
     );
 };
 
+const commonFonts = [
+  { label: 'Calibri', value: 'Calibri, sans-serif', fontFamily: 'Calibri, sans-serif' },
+  { label: 'Arial', value: 'Arial, sans-serif', fontFamily: 'Arial, sans-serif' },
+  { label: 'Inter', value: 'Inter, sans-serif', fontFamily: 'Inter, sans-serif' },
+  { label: 'Times New Roman', value: '"Times New Roman", serif', fontFamily: '"Times New Roman", serif' },
+  { label: 'Courier New', value: '"Courier New", monospace', fontFamily: '"Courier New", monospace' },
+];
+
+const presetColors = [
+  { label: 'Black', value: '#000000', color: '#000000' },
+  { label: 'Red', value: '#EF4444', color: '#EF4444' },
+  { label: 'Orange', value: '#F97316', color: '#F97316' },
+  { label: 'Yellow', value: '#EAB308', color: '#EAB308' },
+  { label: 'Green', value: '#10B981', color: '#10B981' },
+  { label: 'Blue', value: '#3B82F6', color: '#3B82F6' },
+  { label: 'Purple', value: '#8B5CF6', color: '#8B5CF6' },
+  { label: 'Pink', value: '#EC4899', color: '#EC4899' },
+  { label: 'White', value: '#ffffff', color: '#ffffff' },
+  { label: 'None', value: 'transparent', color: 'transparent'}
+];
+
 const HomeRibbon = () => {
+  const state = useSharedState();
+  const activeCellData = state.data[state.activeCell] || {};
   return (
-    <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto custom-scrollbar min-w-max h-[116px] shrink-0">
+    <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] min-w-max h-[116px] shrink-0">
       {/* Font Section */}
       <RibbonSection title="Font">
          <div className="flex gap-2">
              <div className="flex gap-0.5">
-                 <ToolbarItem icon={Bold} label="Bold" active />
-                 <ToolbarItem icon={Italic} label="Italic" />
-                 <ToolbarItem icon={Underline} label="Underline" />
+                 <ToolbarItem icon={Bold} label="Bold" active={activeCellData.bold} onClick={() => updateSelectionStyle('bold', null, true)} />
+                 <ToolbarItem icon={Italic} label="Italic" active={activeCellData.italic} onClick={() => updateSelectionStyle('italic', null, true)} />
+                 <ToolbarItem icon={Underline} label="Underline" active={activeCellData.underline} onClick={() => updateSelectionStyle('underline', null, true)} />
              </div>
-             <div className="flex flex-col justify-between py-0.5 w-[130px]">
-                 <button className="flex items-center justify-between border border-slate-200 rounded-full px-4 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50 transition-colors w-full cursor-pointer outline-none">
-                    Font Family
-                    <ChevronDown size={14} className="text-slate-400" />
-                 </button>
+             <div className="flex flex-col justify-between py-0.5 w-[160px]">
+                 <div className="flex gap-1 items-center px-1">
+                   <EditableDropdown 
+                      items={commonFonts}
+                      value={activeCellData.fontFamily || 'Calibri, sans-serif'}
+                      onSelect={(val: string) => updateSelectionStyle('fontFamily', val)}
+                      placeholder="Font Family"
+                      className="flex-1 min-w-0"
+                   />
+                   <EditableDropdown
+                      items={[8,9,10,11,12,14,16,18,20,22,24,28,32,36,48,72].map(s => ({label: s.toString(), value: s}))}
+                      value={activeCellData.fontSize || 13}
+                      onSelect={(val: number) => updateSelectionStyle('fontSize', val)}
+                      placeholder="13"
+                      className="w-[45px] shrink-0"
+                      isNumber={true}
+                   />
+                 </div>
                  <div className="flex items-center justify-between px-3 mt-1 text-slate-600">
-                    <div className="flex gap-0.5 items-center px-1 text-slate-600">
-                        <span className="font-serif font-bold text-[14px] leading-none hover:text-slate-900 cursor-pointer">A</span>
-                        <ChevronDown size={10} className="hover:text-slate-900 cursor-pointer stroke-[3]" />
-                    </div>
-                    <PaintBucket size={15} className="cursor-pointer hover:text-slate-900" />
-                    <div className="relative cursor-pointer group">
-                        <Baseline size={16} className="text-slate-600 group-hover:text-slate-900" />
-                        <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-red-600" />
-                    </div>
+                    <ColorPickerMenu 
+                       color={activeCellData.fillColor}
+                       onSelect={(val: string) => updateSelectionStyle('fillColor', val)}
+                       trigger={<ColorPickerIcon icon={PaintBucket} isFill color={activeCellData.fillColor} />}
+                    />
+                    <ColorPickerMenu 
+                       color={activeCellData.textColor}
+                       onSelect={(val: string) => updateSelectionStyle('textColor', val)}
+                       trigger={<ColorPickerIcon icon={Baseline} isText color={activeCellData.textColor} />}
+                    />
                  </div>
              </div>
          </div>
@@ -140,11 +521,11 @@ const HomeRibbon = () => {
       {/* Alignment Section */}
       <RibbonSection title="Alignment">
          <div className="flex gap-0.5">
-             <ToolbarItem icon={AlignLeft} label="Left" active />
-             <ToolbarItem icon={AlignCenter} label={"Center"} />
-             <ToolbarItem icon={AlignRight} label={"Right"} />
-             <ToolbarItem icon={ArrowUpDown} label={"Vertical\nAlign"} />
-             <ToolbarItem icon={WrapText} label={"Wrap\nText"} />
+             <ToolbarItem icon={AlignLeft} label="Left" active={activeCellData.align === 'left' || !activeCellData.align} onClick={() => updateSelectionStyle('align', 'left')} />
+             <ToolbarItem icon={AlignCenter} label={"Center"} active={activeCellData.align === 'center'} onClick={() => updateSelectionStyle('align', 'center')} />
+             <ToolbarItem icon={AlignRight} label={"Right"} active={activeCellData.align === 'right'} onClick={() => updateSelectionStyle('align', 'right')} />
+             <ToolbarItem icon={ArrowUpDown} label={"Vertical\nAlign"} active={activeCellData.vAlign === 'middle'} onClick={() => updateSelectionStyle('vAlign', activeCellData.vAlign === 'middle' ? 'bottom' : 'middle')} />
+             <ToolbarItem icon={WrapText} label={"Wrap\nText"} active={activeCellData.wrapText} onClick={() => updateSelectionStyle('wrapText', null, true)} />
          </div>
       </RibbonSection>
 
@@ -188,7 +569,7 @@ const HomeRibbon = () => {
 }
 
 const PageLayoutRibbon = () => (
-    <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto custom-scrollbar min-w-max h-[116px] shrink-0">
+    <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] min-w-max h-[116px] shrink-0">
       <RibbonSection title="Themes">
          <ToolbarItem icon={Palette} label="Themes" iconColor="text-purple-600" active />
          <div className="flex flex-col justify-center gap-0.5 ml-2 h-full">
@@ -243,7 +624,7 @@ const PageLayoutRibbon = () => (
 
 const InsertRibbon = () => (
     <div className="flex flex-col gap-2">
-        <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto custom-scrollbar min-w-max h-[116px] shrink-0">
+        <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] min-w-max h-[116px] shrink-0">
           <RibbonSection title="Tables">
              <ToolbarItem icon={LayoutDashboard} label={"PivotTable"} iconColor="text-emerald-700" />
              <ToolbarItem icon={CheckSquare} label={"Recommended\nPivotTables"} iconColor="text-emerald-600" />
@@ -275,7 +656,7 @@ const InsertRibbon = () => (
           </RibbonSection>
         </div>
 
-        <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto custom-scrollbar min-w-max h-[116px] shrink-0">
+        <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] min-w-max h-[116px] shrink-0">
           <RibbonSection title="Charts">
              <ToolbarItem icon={Map} label="Map" iconColor="text-teal-600" />
              <ToolbarItem icon={PanelTop} label={"Header\n& Footer"} iconColor="text-amber-500" />
@@ -305,7 +686,7 @@ const InsertRibbon = () => (
 );
 
 const FormulasRibbon = () => (
-    <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto custom-scrollbar min-w-max h-[116px] shrink-0">
+    <div className="bg-white/80 backdrop-blur-md rounded-[24px] p-4 shadow-[0_4px_20px_-4px_rgba(0,0,0,0.05)] border border-white flex items-stretch gap-2 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] min-w-max h-[116px] shrink-0">
       <RibbonSection title="Function Library">
          <ToolbarItem icon={Hexagon} label={"Insert\nFunction"} active />
          <ToolbarItem icon={Sigma} label={"AutoSum"} iconColor="text-blue-500" />
@@ -355,17 +736,25 @@ const FormulasRibbon = () => (
 );
 
 const FormulaBar = () => {
+    const state = useSharedState();
+    const cellValue = state.data[state.activeCell]?.value || '';
+
     return (
         <div className="bg-white/80 backdrop-blur-md rounded-full p-1.5 pl-6 shadow-[0_2px_10px_-4px_rgba(0,0,0,0.05)] border border-white flex items-center gap-3 w-full shrink-0">
             <div className="flex items-center gap-4">
-                <span className="text-sm font-semibold text-slate-800 w-6 text-center">D7</span>
+                <span className="text-sm font-semibold text-slate-800 w-8 text-center">{state.activeCell}</span>
                 <div className="w-px h-6 bg-slate-200" />
             </div>
             <div className="flex items-center gap-4 flex-1 pl-1">
                 <span className="font-serif italic font-medium tracking-tighter text-slate-500 text-lg leading-none">fx</span>
                 <input 
                    type="text" 
-                   defaultValue="Column Name" 
+                   value={cellValue}
+                   onChange={(e) => {
+                       const newData = { ...sharedState.data, [state.activeCell]: { ...sharedState.data[state.activeCell], value: e.target.value } };
+                       dispatch({ data: newData });
+                   }}
+                   placeholder="Type a value or formula..."
                    className="flex-1 bg-white border border-slate-100 rounded-full px-5 py-1.5 text-sm outline-none text-slate-700 placeholder-slate-400 font-medium shadow-inner shadow-slate-50/50" 
                 />
             </div>
@@ -373,57 +762,235 @@ const FormulaBar = () => {
     );
 };
 
-const SpreadsheetGrid = () => {
-  const cols = Array.from({length: 40}, (_, i) => {
-    if (i < 26) return String.fromCharCode(65 + i);
-    return 'A' + String.fromCharCode(65 + (i - 26));
-  });
-  const rows = Array.from({length: 40}, (_, i) => i + 1);
+const Cell = React.memo(({ col, row, colIdx, isActive, isSelected, isEditing, cellData }: any) => {
+  const cellId = `${col}${row}`;
+
+  const handleMouseDown = (e: any) => {
+    if (e.detail === 2) {
+      dispatch({ editingCell: cellId });
+      return;
+    }
+    dispatch({
+      activeCell: cellId,
+      selection: { start: cellId, end: cellId },
+      isDragging: true,
+      editingCell: null,
+      showFloatingMenu: false
+    });
+  };
+
+  const handleMouseEnter = () => {
+    if (sharedState.isDragging && sharedState.selection.end !== cellId) {
+      dispatch({ selection: { ...sharedState.selection, end: cellId }, showFloatingMenu: false });
+    }
+  };
 
   return (
-    <div className="bg-white/90 backdrop-blur-3xl rounded-[20px] shadow-[0_4px_25px_-5px_rgba(0,0,0,0.06)] border border-white w-full flex-1 overflow-hidden flex flex-col min-h-0">
-      <div className="overflow-auto custom-scrollbar flex-1 relative bg-white m-1 rounded-[16px] border border-slate-100">
+          <td 
+      className={`w-[100px] min-w-[100px] h-8 border-r border-b border-slate-300 relative outline-none cursor-cell ${isSelected && !isActive ? 'bg-[#e4edfe]' : 'bg-white'} ${isActive ? 'z-20' : 'z-10'}`}
+      onMouseDown={handleMouseDown}
+      onMouseEnter={handleMouseEnter}
+      onDoubleClick={() => { dispatch({ editingCell: cellId, showFloatingMenu: false }); }}
+      style={{
+         backgroundColor: cellData?.fillColor || (isSelected && !isActive ? '#e4edfe' : 'white')
+      }}
+    >
+      {isSelected && !isActive && (
+        <div className="absolute inset-0 bg-blue-500/10 pointer-events-none mix-blend-multiply" />
+      )}
+      {isActive && !isEditing && (
+        <div className="absolute inset-x-[-1px] inset-y-[-1px] border-2 border-blue-500 z-30 pointer-events-none shadow-sm">
+           <div className="absolute -bottom-1 -right-1 w-[7px] h-[7px] bg-blue-500 border border-white cursor-crosshair pointer-events-auto" />
+        </div>
+      )}
+      <div className={`w-full h-full px-1.5 flex items-center ${cellData?.wrapText ? 'whitespace-normal break-words' : 'overflow-hidden whitespace-nowrap'} text-[13px] text-slate-800 select-none`}
+           style={{
+             fontWeight: cellData?.bold ? 600 : 400,
+             fontStyle: cellData?.italic ? 'italic' : 'normal',
+             textDecoration: cellData?.underline ? 'underline' : 'none',
+             justifyContent: cellData?.align === 'center' ? 'center' : (cellData?.align === 'right' ? 'flex-end' : 'flex-start'),
+             alignItems: cellData?.vAlign === 'middle' ? 'center' : (cellData?.vAlign === 'bottom' ? 'flex-end' : 'flex-start'),
+             fontFamily: cellData?.fontFamily || 'inherit',
+             fontSize: cellData?.fontSize ? `${cellData.fontSize}px` : 'inherit',
+             color: cellData?.textColor || 'inherit',
+           }}>
+        {isEditing ? (
+          <input 
+            autoFocus
+            className={`absolute inset-[-1px] px-1.5 outline-none focus:ring-0 focus:outline-none border-2 border-blue-500 bg-white z-40 shadow-sm`}
+            value={cellData?.value || ''}
+            onChange={(e) => {
+              const newData = { ...sharedState.data, [cellId]: { ...cellData, value: e.target.value } };
+              dispatch({ data: newData });
+            }}
+            onBlur={() => dispatch({ editingCell: null })}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                const nextCell = `${col}${row+1}`;
+                dispatch({ editingCell: null, activeCell: nextCell, selection: { start: nextCell, end: nextCell } });
+              }
+            }}
+            style={{
+               fontWeight: cellData?.bold ? 600 : 400,
+               fontStyle: cellData?.italic ? 'italic' : 'normal',
+               textDecoration: cellData?.underline ? 'underline' : 'none',
+               textAlign: cellData?.align || 'left',
+               fontFamily: cellData?.fontFamily || 'inherit',
+               fontSize: cellData?.fontSize ? `${cellData.fontSize}px` : 'inherit',
+               color: cellData?.textColor || 'inherit'
+            }}
+          />
+        ) : (
+          cellData?.value || ''
+        )}
+      </div>
+    </td>
+  );
+}, (prev, next) => {
+   return prev.isActive === next.isActive && 
+          prev.isSelected === next.isSelected && 
+          prev.isEditing === next.isEditing && 
+          prev.cellData === next.cellData;
+});
+
+const SpreadsheetGrid = () => {
+  const state = useSharedState();
+  const range = state.selection ? getRange(state.selection.start, state.selection.end) : null;
+
+  useEffect(() => {
+    const handleMouseUp = (e: MouseEvent) => {
+      if (sharedState.isDragging) {
+        dispatch({ isDragging: false });
+        
+        const currentRange = getRange(sharedState.selection.start, sharedState.selection.end);
+        if (currentRange) {
+           dispatch({ 
+              showFloatingMenu: true, 
+              floatingPos: { top: Math.max(10, e.clientY + 15), left: Math.max(10, e.clientX + 15) } 
+           });
+        }
+      }
+    };
+    
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!sharedState.editingCell && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const cellId = sharedState.activeCell;
+        const cellData = sharedState.data[cellId] || { value: '' };
+        dispatch({ 
+          editingCell: cellId,
+          data: { ...sharedState.data, [cellId]: { ...cellData, value: e.key } },
+          showFloatingMenu: false
+        });
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && !sharedState.editingCell) {
+         const { start, end } = sharedState.selection;
+         const { minColIdx, maxColIdx, minRow, maxRow } = getRange(start, end);
+         const newData = { ...sharedState.data };
+         for(let r=minRow; r<=maxRow; r++) {
+            for(let c=minColIdx; c<=maxColIdx; c++) {
+               const id = `${cols[c]}${r}`;
+               if (newData[id]) newData[id] = { ...newData[id], value: '' };
+            }
+         }
+         dispatch({ data: newData, showFloatingMenu: false });
+      }
+    };
+
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
+  return (
+    <div className="bg-white/90 backdrop-blur-3xl rounded-[20px] shadow-[0_4px_25px_-5px_rgba(0,0,0,0.06)] border border-white w-full flex-1 overflow-hidden flex flex-col min-h-0 relative">
+      <div className="overflow-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] flex-1 relative bg-white m-1 rounded-[16px] border border-slate-200">
         <table className="w-max border-collapse table-fixed text-[13px] bg-white">
-          <thead className="sticky top-0 z-20">
+          <thead className="sticky top-0 z-40 shadow-sm border-b-2 border-slate-300">
             <tr>
-              <th className="w-12 min-w-[48px] h-8 border-r border-b border-slate-200 bg-[#f9fafb] sticky left-0 z-30"></th>
-              {cols.map((col) => (
-                <th 
-                  key={col} 
-                  className="w-[100px] min-w-[100px] border-r border-b border-slate-200 font-medium py-1.5 text-slate-500 bg-[#f9fafb]"
-                >
-                  {col}
-                </th>
-              ))}
+              <th className="w-12 min-w-[48px] h-8 border-r border-b border-slate-300 bg-[#f4f7fb] sticky left-0 z-50"></th>
+              {cols.map((col, colIdx) => {
+                const isActive = range && colIdx >= range.minColIdx && colIdx <= range.maxColIdx;
+                return (
+                  <th 
+                    key={col} 
+                    className={`w-[100px] min-w-[100px] border-r border-b border-slate-300 font-medium py-1 text-slate-600 ${isActive ? 'bg-[#e4edfe] text-blue-900 border-b-blue-400' : 'bg-[#f4f7fb]'}`}
+                  >
+                    {col}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={row} className="h-8">
-                <td className="w-12 min-w-[48px] border-r border-b border-slate-200 text-center font-medium sticky left-0 z-10 text-slate-400 bg-[#f9fafb]">
-                  {row}
-                </td>
-                {cols.map((col) => (
-                  <td 
-                    key={col} 
-                    className="w-[100px] min-w-[100px] border-r border-b border-slate-200 bg-white relative outline-none focus:bg-[#f0f5ff] focus:z-20 cursor-cell group" 
-                    tabIndex={0}
-                  >
-                    <div className="absolute inset-0 border-2 border-transparent group-focus:border-blue-500 pointer-events-none z-20" />
-                    <div className="absolute -bottom-1 -right-1 w-2 h-2 bg-blue-500 border border-white opacity-0 group-focus:opacity-100 z-30 pointer-events-none" />
+            {rows.map((row) => {
+              const isActiveRow = range && row >= range.minRow && row <= range.maxRow;
+              return (
+                <tr key={row} className="h-8 group/tr">
+                  <td className={`w-12 min-w-[48px] border-r border-b border-slate-300 text-center font-medium sticky left-0 z-30 select-none ${isActiveRow ? 'bg-[#e4edfe] text-blue-900 border-r-blue-400' : 'text-slate-500 bg-[#f4f7fb]'}`}>
+                    {row}
                   </td>
-                ))}
-              </tr>
-            ))}
+                  {cols.map((col, colIdx) => {
+                    const cellId = `${col}${row}`;
+                    const isSelected = range ? (colIdx >= range.minColIdx && colIdx <= range.maxColIdx && row >= range.minRow && row <= range.maxRow) : false;
+                    return (
+                       <Cell 
+                          key={col}
+                          col={col}
+                          row={row}
+                          colIdx={colIdx}
+                          isActive={state.activeCell === cellId}
+                          isSelected={isSelected}
+                          isEditing={state.editingCell === cellId}
+                          cellData={state.data[cellId]}
+                       />
+                    )
+                  })}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+      
+      {state.showFloatingMenu && (
+        <div 
+          className="fixed flex items-center gap-1.5 p-1 bg-white/95 backdrop-blur-xl border border-slate-200/80 shadow-[0_8px_30px_-4px_rgba(0,0,0,0.15)] rounded-lg z-50 animate-in fade-in zoom-in-95 duration-100"
+          style={{ top: state.floatingPos.top, left: state.floatingPos.left }}
+          onMouseDown={(e) => {
+             e.stopPropagation();
+             e.preventDefault();
+          }}
+        >
+          <div className="flex bg-slate-100/60 rounded-md p-0.5">
+             <ToolbarItem small icon={Bold} active={state.data[state.activeCell]?.bold} iconColor="text-slate-700" onClick={() => updateSelectionStyle('bold', null, true)} />
+             <ToolbarItem small icon={Italic} active={state.data[state.activeCell]?.italic} iconColor="text-slate-700" onClick={() => updateSelectionStyle('italic', null, true)} />
+             <ToolbarItem small icon={Underline} active={state.data[state.activeCell]?.underline} iconColor="text-slate-700" onClick={() => updateSelectionStyle('underline', null, true)} />
+          </div>
+          <div className="w-[1px] h-6 bg-slate-200 mx-0.5" />
+          <div className="flex bg-slate-100/60 rounded-md p-0.5 relative z-50">
+             <ColorPickerMenu 
+                color={state.data[state.activeCell]?.fillColor}
+                onSelect={(val: string) => updateSelectionStyle('fillColor', val)}
+                trigger={<ColorPickerIcon icon={PaintBucket} isFill color={state.data[state.activeCell]?.fillColor} />}
+             />
+             <ColorPickerMenu 
+                color={state.data[state.activeCell]?.textColor}
+                onSelect={(val: string) => updateSelectionStyle('textColor', val)}
+                trigger={<ColorPickerIcon icon={Baseline} isText color={state.data[state.activeCell]?.textColor} />}
+             />
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('Page Layout');
+  const [activeTab, setActiveTab] = useState('Home');
 
   return (
     <div className="h-screen w-screen flex flex-col items-center py-6 px-4 md:px-8 gap-4 overflow-hidden font-sans">
@@ -433,7 +1000,6 @@ export default function App() {
             {activeTab === 'Page Layout' && <PageLayoutRibbon />}
             {activeTab === 'Insert' && <InsertRibbon />}
             {activeTab === 'Formulas' && <FormulasRibbon />}
-            {/* Fallback for unused tabs */}
             {!['Home', 'Page Layout', 'Insert', 'Formulas'].includes(activeTab) && <HomeRibbon />}
             <FormulaBar />
             <SpreadsheetGrid />
@@ -441,4 +1007,3 @@ export default function App() {
     </div>
   );
 }
-
