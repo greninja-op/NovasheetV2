@@ -56,6 +56,7 @@ let sharedState = {
   activeCell: 'A1',
   selection: { start: 'A1', end: 'A1' },
   isDragging: false,
+  isFilling: false,
   editingCell: null as string | null,
   data: {} as Record<string, CellData>,
   showFloatingMenu: false,
@@ -108,6 +109,55 @@ const updateSelectionStyle = (styleKey: keyof CellData, value: any, toggle: bool
     }
   }
   dispatch({ data: newData });
+};
+
+const handleInsertCells = (type: 'row' | 'col') => {
+    const { start, end } = sharedState.selection;
+    const { minColIdx, maxColIdx, minRow, maxRow } = getRange(start, end);
+    const newData: Record<string, CellData> = {};
+
+    const amount = type === 'row' ? (maxRow - minRow + 1) : (maxColIdx - minColIdx + 1);
+
+    for (let r = 1; r <= rows.length; r++) {
+        for (let c = 0; c < cols.length; c++) {
+            const oldR = type === 'row' && r > minRow ? r - amount : r;
+            const oldC = type === 'col' && c > minColIdx ? c - amount : c;
+            
+            if (type === 'row' && r >= minRow && r <= minRow + amount - 1) continue;
+            if (type === 'col' && c >= minColIdx && c <= minColIdx + amount - 1) continue;
+
+            const oldId = `${cols[oldC]}${oldR}`;
+            if (sharedState.data[oldId]) {
+                const newId = `${cols[c]}${r}`;
+                newData[newId] = { ...sharedState.data[oldId] };
+            }
+        }
+    }
+    dispatch({ data: newData });
+};
+
+const handleDeleteCells = (type: 'row' | 'col') => {
+    const { start, end } = sharedState.selection;
+    const { minColIdx, maxColIdx, minRow, maxRow } = getRange(start, end);
+    const newData: Record<string, CellData> = {};
+
+    const amount = type === 'row' ? (maxRow - minRow + 1) : (maxColIdx - minColIdx + 1);
+
+    for (let r = 1; r <= rows.length; r++) {
+        for (let c = 0; c < cols.length; c++) {
+            const srcR = type === 'row' && r >= minRow ? r + amount : r;
+            const srcC = type === 'col' && c >= minColIdx ? c + amount : c;
+
+            if (srcR <= rows.length && srcC < cols.length) {
+                const srcId = `${cols[srcC]}${srcR}`;
+                const destId = `${cols[c]}${r}`;
+                if (sharedState.data[srcId]) {
+                   newData[destId] = { ...sharedState.data[srcId] };
+                }
+            }
+        }
+    }
+    dispatch({ data: newData, selection: { start: cols[minColIdx]+minRow, end: cols[minColIdx]+minRow }, activeCell: cols[minColIdx]+minRow });
 };
 
 
@@ -343,18 +393,28 @@ const ColorPickerMenu = ({ trigger, color, onSelect, className }: any) => {
     );
 };
 
-const ColorPickerIcon = ({ icon: Icon, color, onClick, isText = false, isFill=false }: any) => (
-  <div onClick={onClick} className="flex flex-col items-center justify-center p-1 rounded-sm hover:bg-slate-100 cursor-pointer h-[28px] min-w-[32px] group">
-    <div className="relative flex flex-col items-center gap-[1px]">
-      {isText ? (
-          <span className="font-serif font-bold text-[14px] leading-none mb-[1px] text-slate-700 group-hover:text-slate-900">A</span>
-      ) : (
-          <Icon size={14} className={isFill ? "text-emerald-600 mb-[1px]" : "text-slate-700"} strokeWidth={1.5} />
-      )}
-      <div className="w-[16px] h-[3px] rounded-[1px]" style={{ backgroundColor: color || (isFill ? 'transparent' : '#000000') }} />
+const ColorPickerIcon = ({ icon: Icon, color, onClick, isText = false, isFill=false }: any) => {
+  const displayColor = (color && color !== 'transparent') ? color : (isText ? '#000000' : 'transparent');
+  return (
+    <div onClick={onClick} className="flex flex-col items-center justify-center p-1 rounded-sm hover:bg-slate-100 cursor-pointer h-[28px] min-w-[32px] group">
+      <div className="relative flex flex-col items-center gap-[1px]">
+        {isText ? (
+            <span className="font-serif font-bold text-[14px] leading-none mb-[1px] text-slate-700 group-hover:text-slate-900">A</span>
+        ) : (
+            <Icon size={14} className="text-slate-700 group-hover:text-slate-900 mb-[1px]" strokeWidth={1.5} />
+        )}
+        <div 
+            className="w-[16px] h-[3px] rounded-[1px] overflow-hidden" 
+            style={{ backgroundColor: displayColor }}
+        >
+            {displayColor === 'transparent' && (
+                <div className="w-full h-full border border-slate-300 bg-white" />
+            )}
+        </div>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const ToolbarItem = ({ icon: Icon, label, active = false, iconColor = "text-slate-600", onClick, small = false }: any) => (
   <div onClick={onClick} className={`flex flex-col items-center justify-start ${small ? 'gap-0.5 min-w-[32px]' : 'gap-1 min-w-[52px]'} cursor-pointer group px-1`}>
@@ -379,11 +439,11 @@ const SmallToolbarItem = ({icon: Icon, label, iconColor = "text-slate-600", acti
 );
 
 const RibbonSection = ({title, children, className="", noBorder=false}: any) => (
-    <div className={`flex flex-col justify-between items-center relative pr-4 pl-2 shrink-0 ${className}`}>
-        <div className="flex gap-1 items-start h-[52px]">
+    <div className={`flex flex-col justify-between items-center relative pr-8 pl-4 shrink-0 h-full ${className}`}>
+        <div className="flex gap-2 items-start h-[52px]">
             {children}
         </div>
-        <span className="text-[10px] text-slate-400 font-medium tracking-wide mt-2 mb-1">{title}</span>
+        <span className="text-[10px] text-slate-800 font-bold tracking-wider mt-auto mb-0.5 opacity-90">{title}</span>
         {!noBorder && <div className="absolute right-0 top-1 bottom-1 w-[1px] bg-slate-200" />}
     </div>
 );
@@ -498,11 +558,11 @@ const HomeRibbon = () => {
                       value={activeCellData.fontSize || 13}
                       onSelect={(val: number) => updateSelectionStyle('fontSize', val)}
                       placeholder="13"
-                      className="w-[45px] shrink-0"
+                      className="w-[64px] shrink-0"
                       isNumber={true}
                    />
                  </div>
-                 <div className="flex items-center justify-between px-3 mt-1 text-slate-600">
+                 <div className="flex items-center justify-center gap-4 px-1 mt-1 text-slate-600">
                     <ColorPickerMenu 
                        color={activeCellData.fillColor}
                        onSelect={(val: string) => updateSelectionStyle('fillColor', val)}
@@ -532,17 +592,36 @@ const HomeRibbon = () => {
       {/* Number Section */}
       <RibbonSection title="Number">
          <div className="flex flex-col justify-between py-0.5 w-[140px] h-[52px]">
-             <button className="flex items-center justify-between border border-slate-200 rounded-full px-4 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50 transition-colors w-full cursor-pointer outline-none">
-                Number Format
-                <ChevronDown size={14} className="text-slate-400" />
-             </button>
+             <DropdownMenu 
+                items={[
+                  {label: 'General', value: 'General'},
+                  {label: 'Number', value: 'Number'},
+                  {label: 'Currency', value: 'Currency'},
+                  {label: 'Accounting', value: 'Accounting'},
+                  {label: 'Short Date', value: 'Short Date'},
+                  {label: 'Long Date', value: 'Long Date'},
+                  {label: 'Time', value: 'Time'},
+                  {label: 'Percentage', value: 'Percentage'},
+                  {label: 'Comma', value: 'Comma'},
+                  {label: 'Text', value: 'Text'}
+                ]}
+                onSelect={(val: string) => updateSelectionStyle('numberFormat', val)}
+                trigger={
+                    <button className="flex items-center justify-between border border-slate-200 rounded-full px-3 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 transition-colors w-full cursor-pointer outline-none">
+                        <span className="truncate">{activeCellData.numberFormat || 'General'}</span>
+                        <ChevronDown size={14} className="text-slate-400 shrink-0 ml-1" />
+                    </button>
+                }
+             />
              <div className="flex items-center justify-between px-3 text-slate-600 mt-2">
-                <DollarSign size={16} className="cursor-pointer hover:text-slate-900" strokeWidth={1.5} />
-                <Percent size={16} className="cursor-pointer hover:text-slate-900" strokeWidth={1.5} />
-                <span className="font-serif italic text-[16px] leading-none cursor-pointer hover:text-slate-900 -mt-1">f</span>
-                <span className="flex gap-[1px] justify-center cursor-pointer">
-                    <span className="w-1.5 h-1.5 rounded-full border-2 border-slate-500"></span>
-                    <span className="w-1.5 h-1.5 rounded-full border-2 border-slate-500"></span>
+                <DollarSign size={16} className="cursor-pointer hover:text-slate-900" strokeWidth={1.5} onClick={() => updateSelectionStyle('numberFormat', 'Currency')} />
+                <Percent size={16} className="cursor-pointer hover:text-slate-900" strokeWidth={1.5} onClick={() => updateSelectionStyle('numberFormat', 'Percentage')} />
+                <span className="font-serif font-medium text-[16px] leading-none cursor-pointer hover:text-slate-900 -mt-[4px]" onClick={() => updateSelectionStyle('numberFormat', 'Comma')}>,</span>
+                <span className="flex gap-[2px] justify-center cursor-pointer hover:text-slate-900" onClick={() => updateSelectionStyle('decimalPlaces', ((activeCellData.decimalPlaces || 2) + 1))}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 12h16"/><path d="m16 6 4 6-4 6"/><circle cx="6" cy="12" r="1" fill="currentColor"/></svg>
+                </span>
+                <span className="flex gap-[2px] justify-center cursor-pointer hover:text-slate-900" onClick={() => updateSelectionStyle('decimalPlaces', Math.max(0, (activeCellData.decimalPlaces || 2) - 1))}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 12H4"/><path d="m8 18-4-6 4-6"/><circle cx="18" cy="12" r="1" fill="currentColor"/></svg>
                 </span>
              </div>
          </div>
@@ -558,10 +637,51 @@ const HomeRibbon = () => {
 
       {/* Cells Section */}
       <RibbonSection title="Cells" noBorder>
-         <div className="flex gap-1">
-             <ToolbarItem icon={ArrowRightToLine} label="Insert" />
-             <ToolbarItem icon={Trash2} label="Delete" />
-             <ToolbarItem icon={Wand2} label="Format" />
+         <div className="flex gap-1 h-[52px] items-center">
+             <DropdownMenu 
+                 items={[
+                     { label: 'Insert Row', value: 'row' },
+                     { label: 'Insert Column', value: 'col' }
+                 ]}
+                 onSelect={(val: any) => handleInsertCells(val)}
+                 trigger={
+                     <div className="flex flex-col items-center justify-center p-1 rounded-sm hover:bg-slate-100 cursor-pointer text-slate-600 gap-0.5">
+                         <ArrowRightToLine size={18} />
+                         <span className="text-[10px] leading-tight text-center">Insert</span>
+                     </div>
+                 }
+             />
+             <DropdownMenu 
+                 items={[
+                     { label: 'Delete Row', value: 'row' },
+                     { label: 'Delete Column', value: 'col' }
+                 ]}
+                 onSelect={(val: any) => handleDeleteCells(val)}
+                 trigger={
+                     <div className="flex flex-col items-center justify-center p-1 rounded-sm hover:bg-slate-100 cursor-pointer text-slate-600 gap-0.5">
+                         <Trash2 size={18} />
+                         <span className="text-[10px] leading-tight text-center">Delete</span>
+                     </div>
+                 }
+             />
+             <DropdownMenu 
+                 items={[
+                     { label: 'Row Height...', value: 'rh' },
+                     { label: 'AutoFit Row Height', value: 'arh' },
+                     { label: 'Column Width...', value: 'cw' },
+                     { label: 'AutoFit Column Width', value: 'acw' },
+                     { label: 'Hide & Unhide', value: 'hu' },
+                     { label: 'Protect Sheet...', value: 'ps' },
+                     { label: 'Lock Cell', value: 'lc' }
+                 ]}
+                 onSelect={(val: any) => {}}
+                 trigger={
+                     <div className="flex flex-col items-center justify-center p-1 rounded-sm hover:bg-slate-100 cursor-pointer text-slate-600 gap-0.5">
+                         <Wand2 size={18} />
+                         <span className="text-[10px] leading-tight text-center">Format</span>
+                     </div>
+                 }
+             />
          </div>
       </RibbonSection>
     </div>
@@ -758,8 +878,29 @@ const FormulaBar = () => {
                    className="flex-1 bg-white border border-slate-100 rounded-full px-5 py-1.5 text-sm outline-none text-slate-700 placeholder-slate-400 font-medium shadow-inner shadow-slate-50/50" 
                 />
             </div>
-        </div>
+         </div>
     );
+};
+
+const formatCellValue = (value: string, format?: string, decimalPlaces: number = 2) => {
+    if (!value) return '';
+    if (format === 'Currency') {
+        const num = parseFloat(value);
+        if (!isNaN(num)) return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: decimalPlaces, maximumFractionDigits: decimalPlaces }).format(num);
+    } else if (format === 'Percentage') {
+        const num = parseFloat(value);
+        if (!isNaN(num)) return new Intl.NumberFormat('en-US', { style: 'percent', minimumFractionDigits: decimalPlaces, maximumFractionDigits: decimalPlaces }).format(num / 100);
+    } else if (format === 'Accounting') {
+        const num = parseFloat(value);
+        if (!isNaN(num)) return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', currencySign: 'accounting', minimumFractionDigits: decimalPlaces, maximumFractionDigits: decimalPlaces }).format(num);
+    } else if (format === 'Comma') {
+        const num = parseFloat(value);
+        if (!isNaN(num)) return num.toLocaleString('en-US', { minimumFractionDigits: decimalPlaces, maximumFractionDigits: decimalPlaces });
+    } else if (format === 'Number') {
+        const num = parseFloat(value);
+        if (!isNaN(num)) return new Intl.NumberFormat('en-US', { minimumFractionDigits: decimalPlaces, maximumFractionDigits: decimalPlaces }).format(num);
+    }
+    return value;
 };
 
 const Cell = React.memo(({ col, row, colIdx, isActive, isSelected, isEditing, cellData }: any) => {
@@ -780,14 +921,14 @@ const Cell = React.memo(({ col, row, colIdx, isActive, isSelected, isEditing, ce
   };
 
   const handleMouseEnter = () => {
-    if (sharedState.isDragging && sharedState.selection.end !== cellId) {
+    if ((sharedState.isDragging || sharedState.isFilling) && sharedState.selection.end !== cellId) {
       dispatch({ selection: { ...sharedState.selection, end: cellId }, showFloatingMenu: false });
     }
   };
 
   return (
           <td 
-      className={`w-[100px] min-w-[100px] h-8 border-r border-b border-slate-300 relative outline-none cursor-cell ${isSelected && !isActive ? 'bg-[#e4edfe]' : 'bg-white'} ${isActive ? 'z-20' : 'z-10'}`}
+      className={`w-[100px] min-w-[100px] border-r border-b border-slate-300 relative outline-none cursor-cell ${isSelected && !isActive ? 'bg-[#e4edfe]' : 'bg-white'} ${isActive ? 'z-20' : 'z-10'}`}
       onMouseDown={handleMouseDown}
       onMouseEnter={handleMouseEnter}
       onDoubleClick={() => { dispatch({ editingCell: cellId, showFloatingMenu: false }); }}
@@ -800,10 +941,16 @@ const Cell = React.memo(({ col, row, colIdx, isActive, isSelected, isEditing, ce
       )}
       {isActive && !isEditing && (
         <div className="absolute inset-x-[-1px] inset-y-[-1px] border-2 border-blue-500 z-30 pointer-events-none shadow-sm">
-           <div className="absolute -bottom-1 -right-1 w-[7px] h-[7px] bg-blue-500 border border-white cursor-crosshair pointer-events-auto" />
+           <div 
+             className="absolute -bottom-1 -right-1 w-[7px] h-[7px] bg-blue-500 border border-white cursor-crosshair pointer-events-auto" 
+             onMouseDown={(e) => {
+               e.stopPropagation();
+               dispatch({ isFilling: true });
+             }}
+           />
         </div>
       )}
-      <div className={`w-full h-full px-1.5 flex items-center ${cellData?.wrapText ? 'whitespace-normal break-words' : 'overflow-hidden whitespace-nowrap'} text-[13px] text-slate-800 select-none`}
+      <div className={`w-full min-h-[30px] px-1.5 py-[5px] flex items-center relative z-0 ${cellData?.wrapText || isEditing ? 'whitespace-normal break-words' : 'overflow-hidden whitespace-nowrap'} text-[13px] text-slate-800 select-none`}
            style={{
              fontWeight: cellData?.bold ? 600 : 400,
              fontStyle: cellData?.italic ? 'italic' : 'normal',
@@ -814,35 +961,44 @@ const Cell = React.memo(({ col, row, colIdx, isActive, isSelected, isEditing, ce
              fontSize: cellData?.fontSize ? `${cellData.fontSize}px` : 'inherit',
              color: cellData?.textColor || 'inherit',
            }}>
+        
         {isEditing ? (
-          <input 
-            autoFocus
-            className={`absolute inset-[-1px] px-1.5 outline-none focus:ring-0 focus:outline-none border-2 border-blue-500 bg-white z-40 shadow-sm`}
-            value={cellData?.value || ''}
-            onChange={(e) => {
-              const newData = { ...sharedState.data, [cellId]: { ...cellData, value: e.target.value } };
-              dispatch({ data: newData });
-            }}
-            onBlur={() => dispatch({ editingCell: null })}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                const nextCell = `${col}${row+1}`;
-                dispatch({ editingCell: null, activeCell: nextCell, selection: { start: nextCell, end: nextCell } });
-              }
-            }}
-            style={{
-               fontWeight: cellData?.bold ? 600 : 400,
-               fontStyle: cellData?.italic ? 'italic' : 'normal',
-               textDecoration: cellData?.underline ? 'underline' : 'none',
-               textAlign: cellData?.align || 'left',
-               fontFamily: cellData?.fontFamily || 'inherit',
-               fontSize: cellData?.fontSize ? `${cellData.fontSize}px` : 'inherit',
-               color: cellData?.textColor || 'inherit'
-            }}
-          />
+            <>
+              <textarea 
+                autoFocus
+                className={`absolute inset-[-1px] px-1.5 py-[5px] outline-none focus:ring-0 focus:outline-none border-2 border-blue-500 bg-white z-40 shadow-sm resize-none overflow-hidden`}
+                value={cellData?.value || ''}
+                onChange={(e) => {
+                  const newData = { ...sharedState.data, [cellId]: { ...cellData, value: e.target.value } };
+                  dispatch({ data: newData });
+                }}
+                onBlur={() => dispatch({ editingCell: null })}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    const nextCell = `${col}${row+1}`;
+                    dispatch({ editingCell: null, activeCell: nextCell, selection: { start: nextCell, end: nextCell } });
+                  }
+                }}
+                style={{
+                   fontWeight: cellData?.bold ? 600 : 400,
+                   fontStyle: cellData?.italic ? 'italic' : 'normal',
+                   textDecoration: cellData?.underline ? 'underline' : 'none',
+                   textAlign: cellData?.align || 'left',
+                   fontFamily: cellData?.fontFamily || 'inherit',
+                   fontSize: cellData?.fontSize ? `${cellData.fontSize}px` : 'inherit',
+                   color: cellData?.textColor || 'inherit',
+                   whiteSpace: 'pre-wrap',
+                   wordBreak: 'break-word',
+                   lineHeight: 1.2
+                }}
+              />
+              <div className="invisible w-full whitespace-pre-wrap break-words pointer-events-none" style={{ lineHeight: 1.2 }}>
+                {(cellData?.value || '') + '\n'}
+              </div>
+            </>
         ) : (
-          cellData?.value || ''
+          formatCellValue(cellData?.value, cellData?.numberFormat, cellData?.decimalPlaces)
         )}
       </div>
     </td>
@@ -871,9 +1027,34 @@ const SpreadsheetGrid = () => {
            });
         }
       }
+      
+      if (sharedState.isFilling) {
+        dispatch({ isFilling: false });
+        
+        const currentRange = getRange(sharedState.selection.start, sharedState.selection.end);
+        if (currentRange) {
+           const newData = { ...sharedState.data };
+           const { minColIdx, maxColIdx, minRow, maxRow } = currentRange;
+           const startValueCell = sharedState.activeCell;
+           const sourceData = newData[startValueCell];
+
+           for (let r = minRow; r <= maxRow; r++) {
+               for (let c = minColIdx; c <= maxColIdx; c++) {
+                   const cellId = `${cols[c]}${r}`;
+                   if (cellId !== startValueCell) {
+                       newData[cellId] = { ...(newData[cellId] || {}), ...sourceData };
+                   }
+               }
+           }
+           dispatch({ data: newData });
+        }
+      }
     };
     
     const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      
       if (!sharedState.editingCell && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const cellId = sharedState.activeCell;
         const cellData = sharedState.data[cellId] || { value: '' };
@@ -929,7 +1110,7 @@ const SpreadsheetGrid = () => {
             {rows.map((row) => {
               const isActiveRow = range && row >= range.minRow && row <= range.maxRow;
               return (
-                <tr key={row} className="h-8 group/tr">
+                <tr key={row} className="group/tr">
                   <td className={`w-12 min-w-[48px] border-r border-b border-slate-300 text-center font-medium sticky left-0 z-30 select-none ${isActiveRow ? 'bg-[#e4edfe] text-blue-900 border-r-blue-400' : 'text-slate-500 bg-[#f4f7fb]'}`}>
                     {row}
                   </td>
